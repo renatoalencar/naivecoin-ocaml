@@ -1,0 +1,3 @@
+(library
+  (name naivecoin)
+  (libraries mirage-crypto unix dream mirage-crypto-ec yojson))
