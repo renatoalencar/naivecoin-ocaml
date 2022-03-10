@@ -1,3 +1,4 @@
+open Lwt.Infix
 
 type t = Block.t list
 
@@ -80,16 +81,14 @@ let generate_next_block_with_transaction ~identity address amount =
       ((get_latest_block ()).Block.index + 1)
   in
   let transactions = [ coinbase_tx ; transaction ] in
-  let block =
-    Proof_of_work.generate_next_block
-      state.chain
-      (Transaction.transaction_list_hash transactions)
-      transactions
-  in
-
-  assert (add_block_to_chain block);
-
-  block
+  Proof_of_work.generate_next_block
+    state.chain
+    (Transaction.transaction_list_hash transactions)
+    transactions >|= fun block ->
+  begin
+    assert (add_block_to_chain block);
+    block
+  end
 
 let generate_next_block ~identity =
   let coinbase_tx =
@@ -98,19 +97,31 @@ let generate_next_block ~identity =
       ((get_latest_block ()).Block.index + 1)
   in
   let transactions = coinbase_tx :: Transaction_pool.current () in
-  let block =
-    Proof_of_work.generate_next_block
-      state.chain
-      (Transaction.transaction_list_hash transactions)
-      transactions
-  in
+  Proof_of_work.generate_next_block
+    state.chain
+    (Transaction.transaction_list_hash transactions)
+    transactions >|= fun block ->
+  begin
+    if add_block_to_chain block then
+      Dream.log "Failed to add generated block %d-%s to chain"
+        block.Block.index
+        (Util.cstruct_to_hex block.Block.hash);
 
-  assert (add_block_to_chain block);
-
-  block
+    block
+  end
 
 let current () =
   state.chain
 
 let utxos () =
   state.utxos
+
+let mine ~identity f =
+  let rec loop () =
+    Lwt_unix.sleep Config.mine_interval >>= fun () ->
+    generate_next_block ~identity >>= fun block ->
+    Dream.log "Mined block %d-%s" block.Block.index (Util.cstruct_to_hex block.Block.hash);
+    f () >>=
+    loop
+  in
+  Lwt.async loop

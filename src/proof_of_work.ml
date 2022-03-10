@@ -13,12 +13,18 @@ let hash_matches_difficulty hash difficulty =
   aux difficulty 0      
 
 let find_block ~index ~previous_hash ~timestamp ~difficulty ~merkle_root transactions =
+  let open Lwt.Infix in
   let rec aux nonce =
     let hash = Block.calculate_hash ~index ~previous_hash ~timestamp ~difficulty ~nonce merkle_root in
     if hash_matches_difficulty hash difficulty then 
-      Block.make ~index ~hash ~previous_hash ~timestamp ~difficulty ~nonce ~merkle_root transactions
+      let block = Block.make ~index ~hash ~previous_hash ~timestamp ~difficulty ~nonce ~merkle_root transactions in
+      Lwt.return block
     else
-      aux (nonce + 1)
+      if nonce mod Config.nonce_pause_interval = 0  then
+        Lwt.pause () >>= fun () ->
+        aux (nonce + 1)
+      else
+        aux (nonce + 1)
   in
   aux 0
 
@@ -47,4 +53,5 @@ let generate_next_block chain merkle_root transactions =
     Unix.time () |> int_of_float
   in
   let difficulty = get_difficulty chain in
+  Dream.log "Mining block %d" index;
   find_block ~index ~previous_hash:previous_block.Block.hash ~timestamp ~difficulty ~merkle_root transactions
