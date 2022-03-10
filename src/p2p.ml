@@ -1,16 +1,22 @@
 open Lwt.Infix
 
+type peer = { address: string
+            ; input: Lwt_io.input_channel
+            ; output: Lwt_io.output_channel }
+
 type message =
   | QueryAll
   | QueryLatest
   | ResponseBlockchain of Block.t list
   | QueryTransactionPool
   | ResponseTransactionPool of Transaction.t list
+  | QueryKnownPeers
+  | ResponseKnownPeers of string list
 
-let peers = ref []
+let peers: (int * peer) list ref = ref []
 let peer_id = ref 0
 
-let write_to_peer (data: message) (_, output) =
+let write_to_peer (data: message) output =
   Lwt_io.write_value output data >>= fun () ->
   Lwt_io.flush output
 
@@ -26,7 +32,7 @@ let broadcast ?ignore:ignore_peer_id data =
       Lwt.catch
         (fun () ->
            if ignore_peer_id <> peer_id then
-             write_to_peer data peer
+             write_to_peer data peer.output
            else
              Lwt.return_unit)
         (function
@@ -52,6 +58,9 @@ let query_latest peer =
 
 let query_transaction_pool peer =
   write_to_peer QueryTransactionPool peer
+
+let query_known_peers peer =
+  write_to_peer QueryKnownPeers peer
 
 let handle_blockchain_received blocks =
   let length = List.length blocks in
@@ -97,8 +106,8 @@ let handle_received_transactions transactions =
     (Transaction_pool.add_to_transaction_pool utxos)
     transactions
 
-let peer_event_loop peer_id peer =
-  let (input, _) = peer in
+let rec peer_event_loop peer_id peer =
+  let { input ; _ } = peer in
   let rec loop () =
     Lwt_io.read_value input >>= function
     | ResponseBlockchain blocks ->
@@ -107,19 +116,43 @@ let peer_event_loop peer_id peer =
       loop
     | QueryLatest ->
       Dream.log "Been queried for latest block";
-      write_to_peer (ResponseBlockchain [ Blockchain.get_latest_block () ]) peer >>=
+      write_to_peer (ResponseBlockchain [ Blockchain.get_latest_block () ]) peer.output >>=
       loop
     | QueryAll ->
       Dream.log "Been queried for the whole blockchain";
-      write_to_peer (ResponseBlockchain (Blockchain.current ())) peer >>=
+      write_to_peer (ResponseBlockchain (Blockchain.current ())) peer.output >>=
       loop
     | QueryTransactionPool ->
-      write_to_peer (ResponseTransactionPool (Transaction_pool.current ())) peer >>=
+      Dream.log "Been queried for transaction pool";
+      write_to_peer (ResponseTransactionPool (Transaction_pool.current ())) peer.output >>=
       loop
     | ResponseTransactionPool transactions ->
+      Dream.log "Received transaction pool with %d transactions" (List.length transactions);
       handle_received_transactions transactions;
       broadcast_transaction_pool peer_id () >>=
       loop
+    | QueryKnownPeers ->
+      Dream.log "Been queried for peer list";
+      let peers = List.map (fun (_, peer) -> peer.address) !peers in
+      write_to_peer (ResponseKnownPeers peers) peer.output >>=
+      loop
+    | ResponseKnownPeers new_peers ->
+      Dream.log "Received peer list with %d peers" (List.length new_peers);
+      let new_peers = List.filter
+          (fun peer ->
+             Option.is_some @@ List.find_opt (fun (_, { address ; _ }) -> address = peer) !peers)
+          new_peers
+      in
+      new_peers
+      |> List.map
+        (fun peer ->
+           match String.split_on_char ':' peer with
+           | [ host ; port ] -> connect_to_peer host (int_of_string port)
+           | _ ->
+             Dream.log "Invalid peer received %s" peer;
+             Lwt.return_unit)
+      |> Lwt.all >>= fun _ ->
+      loop ()
   in
   Dream.log "Waiting messages";
   Lwt.catch loop
@@ -127,16 +160,26 @@ let peer_event_loop peer_id peer =
       | End_of_file -> remove_peer peer_id
       | exn -> Lwt.fail exn)
 
-let connection_handler _ peer =
+and connection_handler addr (input, output) =
+  let address =
+    match addr with
+    | Unix.ADDR_UNIX addr -> addr
+    | Unix.ADDR_INET (addr, port) ->
+      let host = Unix.string_of_inet_addr addr in
+      Printf.sprintf "%s:%d" host port
+  in
+
   let id = !peer_id in
+  let peer = { address ; input ; output } in
   peers := (id, peer) :: !peers;
   incr peer_id;
 
-  query_latest peer >>= fun () ->
-  query_transaction_pool peer >>= fun () ->
+  query_latest peer.output >>= fun () ->
+  query_transaction_pool peer.output >>= fun () ->
+  query_known_peers peer.output >>= fun () ->
   peer_event_loop id peer
 
-let connect_to_peer host port =
+and connect_to_peer host port =
   let addr = Unix.(ADDR_INET (inet_addr_of_string host, port)) in
   Lwt_io.open_connection addr >>= fun peer ->
   Lwt.async (fun () -> connection_handler addr peer);
@@ -149,4 +192,8 @@ let start_p2p_server ~port_offset =
       Lwt_io.establish_server_with_client_address
         addr
         connection_handler
-    )
+    );
+
+  if port_offset <> 0 then
+    let host, port = Config.bootstrap_peer in
+    Lwt.async (fun () -> connect_to_peer host port)
