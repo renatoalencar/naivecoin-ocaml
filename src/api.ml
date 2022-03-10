@@ -50,7 +50,7 @@ let list_blocks _request =
   |> Dream.json
 
 let block_by_index request =
-  let index = int_of_string (Dream.param "index" request) in
+  let index = int_of_string (Dream.param request "index") in
   let chain = Blockchain.current () in
   let nth = List.length chain - index - 1 in
   let block = List.nth chain nth in
@@ -60,7 +60,7 @@ let block_by_index request =
   |> Dream.json
 
 let block_by_hash request =
-  let hash = Cstruct.of_hex (Dream.param "hash" request) in
+  let hash = Cstruct.of_hex (Dream.param request "hash") in
   let chain = Blockchain.current () in
   match
     List.find_opt (fun block -> block.Block.hash = hash)
@@ -74,10 +74,17 @@ let block_by_hash request =
   | None ->
     Dream.empty `Not_Found
 
+let block_head _request =
+  let block = Blockchain.get_latest_block () in
+  block
+  |> block_to_json
+  |> Yojson.Safe.to_string
+  |> Dream.json
+
 let add_block request =
   Dream.body request >>= fun body ->
   let chain = Blockchain.current () in
-  let block = Proof_of_work.generate_next_block chain (Cstruct.of_string body) [] in
+  Proof_of_work.generate_next_block chain (Cstruct.of_string body) [] >>= fun block ->
   let () = assert (Blockchain.add_block_to_chain block) in
   P2p.broadcast_latest_block () >>= fun _ ->
   block
@@ -97,7 +104,7 @@ let mine_transaction identity request =
       |> Yojson.Safe.to_string
       |> Dream.json ~status:`Bad_Request
     else
-      let block = Blockchain.generate_next_block_with_transaction ~identity address amount in
+      Blockchain.generate_next_block_with_transaction ~identity address amount >>= fun block ->
       P2p.broadcast_latest_block () >>= fun _ ->
       block
       |> block_to_json
@@ -107,7 +114,7 @@ let mine_transaction identity request =
     Dream.empty `Bad_Request
 
 let mine_block identity _ =
-  let block = Blockchain.generate_next_block ~identity in
+  Blockchain.generate_next_block ~identity >>= fun block ->
   P2p.broadcast_latest_block () >>= fun _ ->
   block
   |> block_to_json
@@ -116,6 +123,14 @@ let mine_block identity _ =
 
 let balance identity _request =
   Dream.json @@ string_of_int (Wallet.get_balance identity)
+
+let balance_for_address request =
+  let address = Dream.param request "address" in
+  address
+  |> Cstruct.of_hex
+  |> Wallet.get_balance_for_address
+  |> string_of_int
+  |> Dream.json
 
 let connect_to_peer request =
   Lwt.map Dream.from_form_urlencoded (Dream.body request) >>= function
@@ -169,7 +184,8 @@ let get_identity identity _request =
 let cors handler request =
   Lwt.map
     (fun response ->
-       Dream.add_header "Access-Control-Allow-Origin" "*" response)
+       Dream.add_header response "Access-Control-Allow-Origin" "*";
+       response)
     (handler request)
 
 let start ~identity ~port_offset =
@@ -178,9 +194,11 @@ let start ~identity ~port_offset =
   @@ cors
   @@ Dream.router
     [ Dream.get "/blocks" list_blocks
+    ; Dream.get "/block/head" block_head
     ; Dream.get "/block/:index" block_by_index
     ; Dream.get "/block/:hash" block_by_hash
     ; Dream.get "/balance" (balance identity)
+    ; Dream.get "/balance/:address" balance_for_address
     ; Dream.get "/identity" (get_identity identity)
     ; Dream.post "/add_block" add_block
     ; Dream.post "/mine_transaction" (mine_transaction identity)
@@ -189,4 +207,3 @@ let start ~identity ~port_offset =
     ; Dream.post "/mine_block" (mine_block identity)
     ; Dream.post "/add_peer" connect_to_peer 
     ; Dream.get "/utxos" list_utxo ]
-  @@ Dream.not_found
