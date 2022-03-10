@@ -239,11 +239,11 @@ let of_utxo ~private_key ~tx_outs utxos =
   transaction
 
 let forge ~utxos ~private_key ~address amount =
-  let rec build_utxo_list current utxos amount =
+  let rec build_utxo_list current utxos =
     match utxos with
     | utxo :: rest ->
       if current < amount then
-        utxo :: build_utxo_list 0 rest (utxo.UnspentTxOut.amount + current)
+        utxo :: build_utxo_list (utxo.UnspentTxOut.amount + current) rest
       else
         [utxo]
     | [] -> []
@@ -257,8 +257,8 @@ let forge ~utxos ~private_key ~address amount =
       (fun utxo -> utxo.UnspentTxOut.address = source_address)
       utxos
   in
-  let inputs = build_utxo_list 0 utxos amount in
-  if inputs = [] then
+  let utxos = build_utxo_list 0 utxos in
+  if utxos = [] then
     failwith "Not enough funds";
   let output_amount =
     utxos
