@@ -157,7 +157,26 @@ let rec peer_event_loop peer_id peer =
   Dream.log "Waiting messages";
   Lwt.catch loop
     (function
-      | End_of_file -> remove_peer peer_id
+      | End_of_file ->
+        remove_peer peer_id >>= fun () ->
+        if List.length !peers = 0 then
+          wait_for_bootstrap_peer ()
+        else
+          Lwt.return_unit
+
+      | exn -> Lwt.fail exn)
+
+and wait_for_bootstrap_peer () =
+  let host, port = Config.bootstrap_peer in
+  Lwt.catch
+    (fun () ->
+       Dream.log "Connecting to bootstrap peer";
+       connect_to_peer host port)
+    (function
+      | Unix.(Unix_error ((ECONNRESET | ECONNREFUSED), "connect", _)) ->
+        Dream.log "Failed, trying again in 2s";
+        Lwt_unix.sleep 2.0 >>=
+        wait_for_bootstrap_peer
       | exn -> Lwt.fail exn)
 
 and connection_handler addr (input, output) =
@@ -195,5 +214,4 @@ let start_p2p_server ~port_offset =
     );
 
   if port_offset <> 0 then
-    let host, port = Config.bootstrap_peer in
-    Lwt.async (fun () -> connect_to_peer host port)
+    Lwt.async wait_for_bootstrap_peer
