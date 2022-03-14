@@ -16,6 +16,8 @@ type message =
 let peers: (int * peer) list ref = ref []
 let peer_id = ref 0
 
+let get_peers () = !peers
+
 let write_to_peer (data: message) output =
   Lwt_io.write_value output data >>= fun () ->
   Lwt_io.flush output
@@ -200,9 +202,16 @@ and connection_handler addr (input, output) =
 
 and connect_to_peer host port =
   let addr = Unix.(ADDR_INET (inet_addr_of_string host, port)) in
-  Lwt_io.open_connection addr >>= fun peer ->
-  Lwt.async (fun () -> connection_handler addr peer);
-  Lwt.return_unit
+  Lwt.catch
+    (fun () ->
+       Lwt_io.open_connection addr >>= fun peer ->
+       Lwt.async (fun () -> connection_handler addr peer);
+       Lwt.return_unit)
+    (function
+      | Unix.Unix_error _ ->
+        Dream.log "Error connecting to %s:%d" host port;
+        Lwt.return_unit
+      | _ -> Lwt.return_unit)
 
 let start_p2p_server ~port_offset =
   Lwt.async (fun () ->

@@ -181,6 +181,15 @@ let get_identity identity _request =
   |> Yojson.Safe.to_string
   |> Dream.json
 
+let get_peers _request =
+  let peers =
+    List.map (fun (_, peer) -> `String peer.P2p.address)
+      (P2p.get_peers ())
+  in
+  `List peers
+  |> Yojson.Safe.to_string
+  |> Dream.json
+
 let cors handler request =
   Lwt.map
     (fun response ->
@@ -205,5 +214,6 @@ let start ~identity ~port_offset =
     ; Dream.post "/send_transaction" (send_transaction identity)
     ; Dream.get "/transaction_pool" transaction_pool
     ; Dream.post "/mine_block" (mine_block identity)
-    ; Dream.post "/add_peer" connect_to_peer 
+    ; Dream.post "/add_peer" connect_to_peer
+    ; Dream.get "/peers" get_peers
     ; Dream.get "/utxos" list_utxo ]

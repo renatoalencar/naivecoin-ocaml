@@ -13,4 +13,4 @@ let nonce_pause_interval = 73
 
 let bootstrap_peer = ("127.0.0.1", 3000)
 
-let mine_interval = 5.0
+let mine_interval = 15.0
