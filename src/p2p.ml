@@ -1,226 +1,180 @@
 open Lwt.Infix
 
-type peer = { address: string
-            ; input: Lwt_io.input_channel
-            ; output: Lwt_io.output_channel }
+module Peer = struct
+  type t = string * Lwt_io.output_channel
 
-type message =
-  | QueryAll
-  | QueryLatest
-  | ResponseBlockchain of Block.t list
-  | QueryTransactionPool
-  | ResponseTransactionPool of Transaction.t list
-  | QueryKnownPeers
-  | ResponseKnownPeers of string list
+  let compare (a, _) (b, _) = String.compare a b
+end
 
-let peers: (int * peer) list ref = ref []
-let peer_id = ref 0
+module Message = struct
+  type t =
+    | Port of int
+    | Blockchain of Blockchain.t
+    | QueryAll
+    | QueryLatest
 
-let get_peers () = !peers
+  let port port = Port port
 
-let write_to_peer (data: message) output =
-  Lwt_io.write_value output data >>= fun () ->
-  Lwt_io.flush output
+  let blockchain chain = Blockchain chain
 
-let remove_peer peer_id =
-  Dream.log "Removing peer %d" peer_id;
-  peers := List.remove_assoc peer_id !peers;
-  Lwt.return_unit
+  let query_all = QueryAll
 
-let broadcast ?ignore:ignore_peer_id data =
-  let ignore_peer_id = Option.value ~default:(-1) ignore_peer_id in
-  !peers
-  |> List.map (fun (peer_id, peer) ->
-      Lwt.catch
-        (fun () ->
-           if ignore_peer_id <> peer_id then
-             write_to_peer data peer.output
-           else
-             Lwt.return_unit)
-        (function
-         | End_of_file -> remove_peer peer_id
-         | exn -> Lwt.fail exn))        
+  let query_latest = QueryLatest
+end
+
+module Peer_set = Set.Make(Peer)
+
+let peer_set = ref Peer_set.empty
+
+let peers () =
+  !peer_set
+  |> Peer_set.to_seq
+  |> List.of_seq
+  |> List.map (fun (peer, _) -> peer)
+
+let broadcast value =
+  !peer_set
+  |> Peer_set.to_seq
+  |> Seq.map (fun (_, output) -> Lwt_io.write_value output value)
+  |> List.of_seq
   |> Lwt.all
   |> Lwt.map ignore
 
+let send (value: Message.t) output =
+  Lwt_io.write_value output value
+
 let broadcast_latest_block () =
-  broadcast (ResponseBlockchain [ Blockchain.get_latest_block () ])
+  Dream.log "Broadcasting latest block";
 
-let broadcast_whole_chain () =
-  broadcast (ResponseBlockchain (Blockchain.current ()))
+  let block = Blockchain.get_latest_block () in
+  broadcast (Message.blockchain [block])
 
-let broadcast_query_all () =
-  broadcast QueryAll
+let broadcast_transaction_pool _ () =
+  Lwt.return_unit
 
-let broadcast_transaction_pool ignore () =
-  broadcast ~ignore (ResponseTransactionPool (Transaction_pool.current ()))
+let query_all_blocks () =
+  Dream.log "Query for all blocks";
+  broadcast Message.query_all
 
-let query_latest peer =
-  write_to_peer QueryLatest peer
+let query_latest_block output =
+  send Message.query_latest output
 
-let query_transaction_pool peer =
-  write_to_peer QueryTransactionPool peer
+let handle_blockchain chain =
+  let latest_block_held = Blockchain.get_latest_block () in
+  match chain with
+  | [] -> Lwt.return_unit
+  | latest_block_received :: blocks
+       when latest_block_received.Block.index > latest_block_held.Block.index ->
+     Dream.log "Received block %d, got %d. Node probably behind"
+       latest_block_received.Block.index
+       latest_block_held.Block.index;
 
-let query_known_peers peer =
-  write_to_peer QueryKnownPeers peer
+     if latest_block_received.Block.previous_hash = latest_block_held.Block.hash
+        && Blockchain.add_block_to_chain latest_block_received then
+       broadcast_latest_block ()
+     else if blocks = [] then
+       (* query all blocks *)
+       query_all_blocks ()
+     else if Blockchain.replace_chain chain then
+       broadcast_latest_block ()
+     else
+       Lwt.return_unit
+  | _ :: _ -> Lwt.return_unit
 
-let handle_blockchain_received blocks =
-  let length = List.length blocks in
-  Dream.log "Received %d blocks" length;
-  if length > 0 then
-    let latest_block_received = List.hd blocks in
-    let latest_block_held = Blockchain.get_latest_block () in
-    if latest_block_received.Block.index > latest_block_held.Block.index then begin
-      Dream.log "Blockchain possibly behind. We got: %d Peer got: %d"
-        latest_block_held.Block.index
-        latest_block_received.Block.index;
-
-      if latest_block_held.Block.hash = latest_block_received.Block.previous_hash then
-        if Blockchain.add_block_to_chain latest_block_received then begin
-          Dream.log "Received latest block, broadcasting to other peers";
-          broadcast_latest_block ()
-        end
-        else
-          Lwt.return_unit
-      else if length = 1 then begin
-        (* Broadcast querying all peers *)
-        Dream.log "We have to query the chain from our peer";
-        broadcast_query_all ()
-      end
-      else begin
-        Dream.log "Received blockchain is longer than current blockchain";
-        if Blockchain.replace_chain blocks then
-          broadcast_latest_block ()
-        else
-          Lwt.return_unit
-      end
-    end
-    else
-      Lwt.return_unit
-  else begin
-    Dream.log "Received blockchain is not longer than current blockchain. Do nothing";
-    Lwt.return_unit
-  end
-
-let handle_received_transactions transactions =
-  let utxos = Blockchain.utxos () in
-  List.iter
-    (Transaction_pool.add_to_transaction_pool utxos)
-    transactions
-
-let rec peer_event_loop peer_id peer =
-  let { input ; _ } = peer in
-  let rec loop () =
-    Lwt_io.read_value input >>= function
-    | ResponseBlockchain blocks ->
-      Dream.log "Receiving blocks";
-      handle_blockchain_received blocks >>=
-      loop
-    | QueryLatest ->
-      Dream.log "Been queried for latest block";
-      write_to_peer (ResponseBlockchain [ Blockchain.get_latest_block () ]) peer.output >>=
-      loop
-    | QueryAll ->
-      Dream.log "Been queried for the whole blockchain";
-      write_to_peer (ResponseBlockchain (Blockchain.current ())) peer.output >>=
-      loop
-    | QueryTransactionPool ->
-      Dream.log "Been queried for transaction pool";
-      write_to_peer (ResponseTransactionPool (Transaction_pool.current ())) peer.output >>=
-      loop
-    | ResponseTransactionPool transactions ->
-      Dream.log "Received transaction pool with %d transactions" (List.length transactions);
-      handle_received_transactions transactions;
-      broadcast_transaction_pool peer_id () >>=
-      loop
-    | QueryKnownPeers ->
-      Dream.log "Been queried for peer list";
-      let peers = List.map (fun (_, peer) -> peer.address) !peers in
-      write_to_peer (ResponseKnownPeers peers) peer.output >>=
-      loop
-    | ResponseKnownPeers new_peers ->
-      Dream.log "Received peer list with %d peers" (List.length new_peers);
-      let new_peers = List.filter
-          (fun peer ->
-             Option.is_some @@ List.find_opt (fun (_, { address ; _ }) -> address = peer) !peers)
-          new_peers
+module Connection = struct
+  let handler node addr (input, output) =
+    let addr =
+      match addr with
+      | Unix.ADDR_INET (addr, _) -> Unix.string_of_inet_addr addr
+      | _ -> assert false
+    in
+    let full_addr = ref None in
+    let handle_event = function
+      | Message.Port port ->
+         Dream.log "Received Port %d from %s" port addr;
+         let peer = Printf.sprintf "%s:%d" addr port in
+         peer_set := Peer_set.add (peer, output) !peer_set;
+         full_addr := Some peer;
+         Lwt.return_unit
+      | Blockchain blocks ->
+         Dream.log "Received %d blocks" (List.length blocks);
+         handle_blockchain blocks
+      | QueryAll ->
+         Dream.log "Being queried for the whole chain, sending...";
+         send (Message.blockchain (Blockchain.current ())) output
+      | QueryLatest ->
+         Dream.log "Being queried for the latest block";
+         send (Message.blockchain [Blockchain.get_latest_block ()]) output
+    in
+    let rec loop () =
+      let p =
+        Lwt_io.read_value input >>=
+        handle_event
       in
-      new_peers
-      |> List.map
-        (fun peer ->
-           match String.split_on_char ':' peer with
-           | [ host ; port ] -> connect_to_peer host (int_of_string port)
-           | _ ->
-             Dream.log "Invalid peer received %s" peer;
-             Lwt.return_unit)
-      |> Lwt.all >>= fun _ ->
-      loop ()
+      p >>= fun () ->
+      Lwt.catch
+        loop
+        (function
+         | End_of_file ->
+            let () =
+              match !full_addr with
+              | Some peer -> 
+                 Dream.log "Lost connection with %s, removing peer." peer;
+                 peer_set := Peer_set.remove (peer, output) !peer_set
+              | None -> ()
+            in
+            Lwt.return_unit
+         | exn -> Lwt.fail exn)
+           
+    in
+    let port = Config.p2p_base_port + node in
+    send (Message.port port) output >>= fun () ->
+    query_latest_block output >>=
+    loop
+
+  let connect node host port =
+    let address = Unix.(ADDR_INET (inet_addr_of_string host, port)) in
+    let open_connection () =
+      Lwt_io.open_connection address >>= fun pair ->
+      Dream.log "Connected successfuly, waiting events from %s:%d" host port;
+
+      Lwt.async (fun () -> handler node address pair);
+
+      Lwt_result.return ()
+    in
+    Lwt.catch
+      open_connection
+      (function
+       | Unix.Unix_error _ as exn ->
+          Dream.log "Connection to %s:%d failed" host port;
+          Lwt_result.fail exn
+       | exn -> Lwt.fail exn)
+
+  let rec wait_for_bootstrap_node node =
+    let host, port = Config.bootstrap_node in
+    Dream.log "Connecting to bootstrap node";
+    connect node host port >>= function
+    | Ok () -> Lwt.return_unit
+    | Error _ ->
+       Dream.log "Waiting 5 seconds...";
+       Lwt_unix.sleep 5.0 >>= fun () ->
+       wait_for_bootstrap_node node
+end
+
+let connect_to_peer = Connection.connect
+
+let start ~node =
+  let connection_handler addr pair =
+    Dream.log "Received connection, waiting for events...";
+    Connection.handler node addr pair
   in
-  Dream.log "Waiting messages";
-  Lwt.catch loop
-    (function
-      | End_of_file ->
-        remove_peer peer_id >>= fun () ->
-        if List.length !peers = 0 then
-          wait_for_bootstrap_peer ()
-        else
-          Lwt.return_unit
-
-      | exn -> Lwt.fail exn)
-
-and wait_for_bootstrap_peer () =
-  let host, port = Config.bootstrap_peer in
-  Lwt.catch
-    (fun () ->
-       Dream.log "Connecting to bootstrap peer";
-       connect_to_peer host port)
-    (function
-      | Unix.(Unix_error ((ECONNRESET | ECONNREFUSED), "connect", _)) ->
-        Dream.log "Failed, trying again in 2s";
-        Lwt_unix.sleep 2.0 >>=
-        wait_for_bootstrap_peer
-      | exn -> Lwt.fail exn)
-
-and connection_handler addr (input, output) =
-  let address =
-    match addr with
-    | Unix.ADDR_UNIX addr -> addr
-    | Unix.ADDR_INET (addr, port) ->
-      let host = Unix.string_of_inet_addr addr in
-      Printf.sprintf "%s:%d" host port
-  in
-
-  let id = !peer_id in
-  let peer = { address ; input ; output } in
-  peers := (id, peer) :: !peers;
-  incr peer_id;
-
-  query_latest peer.output >>= fun () ->
-  query_transaction_pool peer.output >>= fun () ->
-  query_known_peers peer.output >>= fun () ->
-  peer_event_loop id peer
-
-and connect_to_peer host port =
-  let addr = Unix.(ADDR_INET (inet_addr_of_string host, port)) in
-  Lwt.catch
-    (fun () ->
-       Lwt_io.open_connection addr >>= fun peer ->
-       Lwt.async (fun () -> connection_handler addr peer);
-       Lwt.return_unit)
-    (function
-      | Unix.Unix_error _ ->
-        Dream.log "Error connecting to %s:%d" host port;
-        Lwt.return_unit
-      | _ -> Lwt.return_unit)
-
-let start_p2p_server ~port_offset =
   Lwt.async (fun () ->
-      let addr = Unix.(ADDR_INET (inet_addr_any, Config.p2p_base_port + port_offset)) in
-      Lwt.map ignore @@
+      let address = Unix.(ADDR_INET (inet_addr_any, Config.p2p_base_port + node)) in
       Lwt_io.establish_server_with_client_address
-        addr
+        address
         connection_handler
+      >|= ignore
     );
 
-  if port_offset <> 0 then
-    Lwt.async wait_for_bootstrap_peer
+  if node <> 0 then
+    Lwt.async (fun () -> Connection.wait_for_bootstrap_node node)

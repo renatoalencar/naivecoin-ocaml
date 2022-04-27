@@ -132,12 +132,13 @@ let balance_for_address request =
   |> string_of_int
   |> Dream.json
 
-let connect_to_peer request =
+let connect_to_peer node request =
   Lwt.map Dream.from_form_urlencoded (Dream.body request) >>= function
   | [ "host", host ; "port", port ] ->
     let port = int_of_string port in
-    P2p.connect_to_peer host port >>= fun () ->
-    Dream.empty `Created
+    P2p.connect_to_peer node host port >>= (function
+    | Ok () -> Dream.empty `Created
+    | Error _ -> Dream.empty `Internal_Server_Error)
   | _ ->
     Dream.empty `Bad_Request
 
@@ -182,13 +183,7 @@ let get_identity identity _request =
   |> Dream.json
 
 let get_peers _request =
-  let peers =
-    List.map (fun (_, peer) -> `String peer.P2p.address)
-      (P2p.get_peers ())
-  in
-  `List peers
-  |> Yojson.Safe.to_string
-  |> Dream.json
+  Dream.empty `Not_Found
 
 let cors handler request =
   Lwt.map
@@ -197,8 +192,8 @@ let cors handler request =
        response)
     (handler request)
 
-let start ~identity ~port_offset =
-  Dream.run ~port:(Config.node_api_base_port + port_offset)
+let start ~identity ~node =
+  Dream.run ~port:(Config.node_api_base_port + node)
   @@ Dream.logger
   @@ cors
   @@ Dream.router
@@ -214,6 +209,6 @@ let start ~identity ~port_offset =
     ; Dream.post "/send_transaction" (send_transaction identity)
     ; Dream.get "/transaction_pool" transaction_pool
     ; Dream.post "/mine_block" (mine_block identity)
-    ; Dream.post "/add_peer" connect_to_peer
+    ; Dream.post "/add_peer" (connect_to_peer node)
     ; Dream.get "/peers" get_peers
     ; Dream.get "/utxos" list_utxo ]

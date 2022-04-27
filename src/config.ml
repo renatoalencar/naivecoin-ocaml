@@ -11,6 +11,6 @@ let p2p_base_port = 3000
 
 let nonce_pause_interval = 73
 
-let bootstrap_peer = ("127.0.0.1", 3000)
+let bootstrap_node = ("127.0.0.1", p2p_base_port)
 
-let mine_interval = 15.0
+let mine_interval = 2.0

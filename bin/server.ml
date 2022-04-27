@@ -2,12 +2,14 @@ open Naivecoin
 
 let api = ref false
 let mine = ref false
+let data = ref ""
 
 let usage = "server [-api] [-mine] <node>"
 
 let spec_list =
-  [("-api", Arg.Set api, "Run API endpoint")
-  ;("-mine", Arg.Set mine, "Run miner")]
+  [ "-api", Arg.Set api, "Run API endpoint"
+  ; "-mine", Arg.Set mine, "Run miner"
+  ; "-data", Arg.Set_string data, "Data directory"  ]
 
 let node = ref 0
 
@@ -17,13 +19,13 @@ let anon_fun snode =
 let () =
   Arg.parse spec_list anon_fun usage;
 
-  let identity_file = Printf.sprintf "identity.%d" !node in
-  let state_file = Printf.sprintf "state.%d" !node in
+  let identity_file = Printf.sprintf "%s/identity.%d" !data !node in
+  let state_file = Printf.sprintf "%s/state.%d" !data !node in
 
   let identity = Identity.init identity_file in
   Dream.log "Starting node. Identity: %s" (Identity.address_to_string identity);
 
-  P2p.start_p2p_server ~port_offset:!node;
+  P2p.start ~node:!node;
 
   let storage = Storage.make Blockchain.state state_file in
   begin
@@ -35,4 +37,4 @@ let () =
     Naivecoin.Blockchain.mine ~identity Naivecoin.P2p.broadcast_latest_block;
 
   if !api then
-    Naivecoin.Api.start ~identity ~port_offset:!node
+    Naivecoin.Api.start ~identity ~node:!node
