@@ -12,6 +12,8 @@ module Message = struct
     | Blockchain of Blockchain.t
     | QueryAll
     | QueryLatest
+    | QueryTransactionPool
+    | Transaction_pool of Transaction_pool.t
 
   let port port = Port port
 
@@ -20,6 +22,10 @@ module Message = struct
   let query_all = QueryAll
 
   let query_latest = QueryLatest
+
+  let query_transaction_pool = QueryTransactionPool
+
+  let transaction_pool pool = Transaction_pool pool
 end
 
 module Peer_set = Set.Make(Peer)
@@ -50,7 +56,8 @@ let broadcast_latest_block () =
   broadcast (Message.blockchain [block])
 
 let broadcast_transaction_pool _ () =
-  Lwt.return_unit
+  Dream.log "Broadcasting transaction pool";
+  broadcast (Message.transaction_pool (Transaction_pool.current ()))
 
 let query_all_blocks () =
   Dream.log "Query for all blocks";
@@ -58,6 +65,9 @@ let query_all_blocks () =
 
 let query_latest_block output =
   send Message.query_latest output
+
+let query_transaction_pool output =
+  send Message.query_transaction_pool output
 
 let handle_blockchain chain =
   let latest_block_held = Blockchain.get_latest_block () in
@@ -105,6 +115,15 @@ module Connection = struct
       | QueryLatest ->
          Dream.log "Being queried for the latest block";
          send (Message.blockchain [Blockchain.get_latest_block ()]) output
+      | QueryTransactionPool ->
+         Dream.log "Being queried for transaction pool";
+         send (Message.transaction_pool (Transaction_pool.current ())) output
+      |  Transaction_pool new_transactions ->
+         new_transactions
+         |> List.iter
+              (fun t ->
+                Transaction_pool.add_to_transaction_pool (Blockchain.utxos ()) t)
+         |> Lwt.return
     in
     let rec loop () =
       let p =
@@ -129,7 +148,8 @@ module Connection = struct
     in
     let port = Config.p2p_base_port + node in
     send (Message.port port) output >>= fun () ->
-    query_latest_block output >>=
+    query_latest_block output >>= fun () ->
+    query_transaction_pool output >>=
     loop
 
   let connect node host port =

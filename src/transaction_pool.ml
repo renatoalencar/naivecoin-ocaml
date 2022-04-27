@@ -1,3 +1,4 @@
+type t = Transaction.t list
 
 let state = ref []
 
