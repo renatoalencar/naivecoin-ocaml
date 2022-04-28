@@ -5,7 +5,7 @@ let transaction_to_json transaction =
            ; "signature", `String (Util.cstruct_to_hex tx_in.Transaction.TxIn.signature) ]
   in
   let tx_out_to_json tx_out =
-    `Assoc [ "address", `String (Util.cstruct_to_hex tx_out.Transaction.TxOut.address)
+    `Assoc [ "address", `String (Address.to_string tx_out.Transaction.TxOut.address)
            ; "amount", `Int tx_out.Transaction.TxOut.amount ]
   in
   `Assoc [ "id", `String (Util.cstruct_to_hex transaction.Transaction.id)
@@ -25,7 +25,7 @@ let block_to_json block =
 let utxo_to_json utxo =
   `Assoc [ "tx_out_id", `String (Util.cstruct_to_hex utxo.Transaction.UnspentTxOut.tx_out_id)
          ; "tx_out_index", `Int utxo.Transaction.UnspentTxOut.tx_out_index
-         ; "address", `String (Util.cstruct_to_hex utxo.Transaction.UnspentTxOut.address)
+         ; "address", `String (Address.to_string utxo.Transaction.UnspentTxOut.address)
          ; "amount", `Int utxo.Transaction.UnspentTxOut.amount ]
 
 open Lwt.Infix
@@ -98,7 +98,7 @@ let mine_transaction identity request =
   |> Lwt.map Dream.from_form_urlencoded >>= function
   | [ "address", address ; "amount", amount ] ->
     let amount = int_of_string amount in
-    let address = Cstruct.of_hex address in
+    let address = Address.of_string address in
     if amount > Wallet.get_balance identity then
       error "Not enough funds"
       |> Yojson.Safe.to_string
@@ -127,7 +127,7 @@ let balance identity _request =
 let balance_for_address request =
   let address = Dream.param request "address" in
   address
-  |> Cstruct.of_hex
+  |> Address.of_string
   |> Wallet.get_balance_for_address
   |> string_of_int
   |> Dream.json
@@ -146,7 +146,7 @@ let send_transaction identity request =
   Lwt.map Dream.from_form_urlencoded (Dream.body request) >>= function
   | [ "address", address ; "amount", amount ] ->
     let amount = int_of_string amount in
-    let address = Cstruct.of_hex address in
+    let address = Address.of_string address in
     if amount > Wallet.get_balance identity then
       error "Not enough funds"
       |> Yojson.Safe.to_string
@@ -178,7 +178,7 @@ let transaction_pool _request =
   |> Dream.json
 
 let get_identity identity _request =
-  `String (Util.cstruct_to_hex identity.Identity.address)
+  `String (Address.to_string identity.Identity.address)
   |> Yojson.Safe.to_string
   |> Dream.json
 
